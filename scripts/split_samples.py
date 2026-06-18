@@ -22,10 +22,15 @@ import soundfile as sf
 SILENCE_THRESHOLD_DB   = -30   # dB below peak; used for edge-trimming each note    -50
 MIN_NOTE_SPACING_S     = 0.20  # minimum time (s) between two onsets    0.5
 MIN_SEGMENT_DURATION_S = 0.20  # discard segments shorter than this     0.3
-PITCH_CONFIDENCE_MIN   = 0.45  # pyin voiced-probability cutoff (0–1)   0.75
+PITCH_CONFIDENCE_MIN   = 0.35  # pyin voiced-probability cutoff (0–1)   0.75
 FRAME_HOP_LENGTH       = 512   # hop size shared by onset detector and pyin 512
 FRAME_LENGTH           = 2048  # frame size for RMS (used in trim)      2048
 OUTPUT_DIR             = "output"
+# 0.0 = only accept notes clearly closer to a natural (strict, half-semitone boundary)
+# 1.0 = accept nearest note regardless of whether it is natural or a semitone
+# intermediate values scale the acceptance radius linearly in MIDI units:
+#   radius = 0.5 + SEMITONE_TOLERANCE * 0.5  (0.5 is the half-bandwidth of a semitone)
+SEMITONE_TOLERANCE     = 0.9
 
 # ── Note tables ────────────────────────────────────────────────────────────────
 _NATURAL_PCS = {0, 2, 4, 5, 7, 9, 11}   # C D E F G A B (pitch classes mod 12)
@@ -33,9 +38,11 @@ _PC_TO_NAME  = {0: "C", 2: "D", 4: "E", 5: "F", 7: "G", 9: "A", 11: "B"}
 
 
 def freq_to_note(freq_hz: float) -> Optional[str]:
-    """Return e.g. 'C4' if freq is closer to a natural note than a semitone.
+    """Return e.g. 'C4' snapped to the nearest natural note, or None if rejected.
 
-    Returns None when the pitch is closer to a semitone (accidental).
+    Rejection is controlled by SEMITONE_TOLERANCE:
+      0.0 → discard if the pitch is closer to a semitone than to a natural note
+      1.0 → accept even exact semitone pitches (snapped to nearest natural)
     """
     if not (freq_hz > 0):
         return None
@@ -44,21 +51,17 @@ def freq_to_note(freq_hz: float) -> Optional[str]:
     center = round(midi_float)
 
     min_nat_dist  = float("inf")
-    min_semi_dist = float("inf")
     best_nat_midi = None
 
     for m in range(center - 2, center + 3):
         dist = abs(midi_float - m)
         pc   = m % 12
-        if pc in _NATURAL_PCS:
-            if dist < min_nat_dist:
-                min_nat_dist  = dist
-                best_nat_midi = m
-        else:
-            if dist < min_semi_dist:
-                min_semi_dist = dist
+        if pc in _NATURAL_PCS and dist < min_nat_dist:
+            min_nat_dist  = dist
+            best_nat_midi = m
 
-    if best_nat_midi is None or min_nat_dist >= min_semi_dist:
+    acceptance_radius = 0.5 + SEMITONE_TOLERANCE * 0.5
+    if best_nat_midi is None or min_nat_dist >= acceptance_radius:
         return None
 
     pc     = best_nat_midi % 12
@@ -149,7 +152,7 @@ def main() -> None:
 
         note = freq_to_note(freq)
         if note is None:
-            print(f"  Segment {idx}: {freq:.1f} Hz is closer to a semitone — skipping")
+            print(f"  Segment {idx}: {freq:.1f} Hz too close to a semitone — skipping (try raising SEMITONE_TOLERANCE)")
             continue
 
         print(f"  Segment {idx}: {freq:.1f} Hz → {note}")
